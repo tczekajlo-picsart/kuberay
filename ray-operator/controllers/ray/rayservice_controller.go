@@ -189,6 +189,11 @@ func (r *RayServiceReconciler) Reconcile(ctx context.Context, request ctrl.Reque
 		if isActiveClusterReady, activeClusterServeApplications, err = r.reconcileServe(ctx, rayServiceInstance, activeRayClusterInstance); err != nil {
 			return ctrl.Result{RequeueAfter: ServiceDefaultRequeueDuration}, err
 		}
+	} else if activeRayClusterInstance != nil && utils.IsIncrementalUpgradeEnabled(&rayServiceInstance.Spec) {
+		logger.Info("Reconciling the Serve applications for active cluster during IncrementalUpgrade", "clusterName", activeRayClusterInstance.Name)
+		if isActiveClusterReady, activeClusterServeApplications, err = r.reconcileServe(ctx, rayServiceInstance, activeRayClusterInstance); err != nil {
+			return ctrl.Result{RequeueAfter: ServiceDefaultRequeueDuration}, err
+		}
 	}
 
 	// Reconcile K8s services and make sure it points to the correct RayCluster.
@@ -440,16 +445,28 @@ func inconsistentRayServiceStatus(ctx context.Context, oldStatus rayv1.RayServic
 
 	if features.Enabled(features.RayServiceIncrementalUpgrade) {
 		// Also check for changes in IncrementalUpgrade related Status fields.
-		if oldStatus.TrafficRoutedPercent != newStatus.TrafficRoutedPercent {
-			logger.Info("inconsistentRayServiceStatus RayService updated TrafficRoutedPercent", "old TrafficRoutedPercent", oldStatus.TrafficRoutedPercent, "new TrafficRoutedPercent", newStatus.TrafficRoutedPercent)
+		if (oldStatus.TrafficRoutedPercent == nil) != (newStatus.TrafficRoutedPercent == nil) ||
+			(oldStatus.TrafficRoutedPercent != nil && newStatus.TrafficRoutedPercent != nil &&
+				*oldStatus.TrafficRoutedPercent != *newStatus.TrafficRoutedPercent) {
+			logger.Info("inconsistentRayServiceStatus RayService updated TrafficRoutedPercent",
+				"old TrafficRoutedPercent", oldStatus.TrafficRoutedPercent,
+				"new TrafficRoutedPercent", newStatus.TrafficRoutedPercent)
 			return true
 		}
-		if oldStatus.TargetCapacity != newStatus.TargetCapacity {
-			logger.Info("inconsistentRayServiceStatus RayService updated TargetCapacity", "old TargetCapacity", oldStatus.TargetCapacity, "new TargetCapacity", newStatus.TargetCapacity)
+		if (oldStatus.TargetCapacity == nil) != (newStatus.TargetCapacity == nil) ||
+			(oldStatus.TargetCapacity != nil && newStatus.TargetCapacity != nil &&
+				*oldStatus.TargetCapacity != *newStatus.TargetCapacity) {
+			logger.Info("inconsistentRayServiceStatus RayService updated TargetCapacity",
+				"old TargetCapacity", oldStatus.TargetCapacity,
+				"new TargetCapacity", newStatus.TargetCapacity)
 			return true
 		}
-		if oldStatus.LastTrafficMigratedTime != newStatus.LastTrafficMigratedTime {
-			logger.Info("inconsistentRayServiceStatus RayService updated LastTrafficMigratedTime", "old LastTrafficMigratedTime", oldStatus.LastTrafficMigratedTime, "new LastTrafficMigratedTime", newStatus.LastTrafficMigratedTime)
+		if (oldStatus.LastTrafficMigratedTime == nil) != (newStatus.LastTrafficMigratedTime == nil) ||
+			(oldStatus.LastTrafficMigratedTime != nil && newStatus.LastTrafficMigratedTime != nil &&
+				!oldStatus.LastTrafficMigratedTime.Equal(newStatus.LastTrafficMigratedTime)) {
+			logger.Info("inconsistentRayServiceStatus RayService updated LastTrafficMigratedTime",
+				"old LastTrafficMigratedTime", oldStatus.LastTrafficMigratedTime,
+				"new LastTrafficMigratedTime", newStatus.LastTrafficMigratedTime)
 			return true
 		}
 	}
@@ -1249,9 +1266,9 @@ func (r *RayServiceReconciler) checkIfNeedIncrementalUpgradeUpdate(ctx context.C
 	return true, "Active RayCluster TargetCapacity has not finished scaling down."
 }
 
-// updateServeTargetCapacity reconcile the target_capacity of the ServeConfig for a given RayCluster during
+// reconcileServeTargetCapacity reconciles the target_capacity of the ServeConfig for a given RayCluster during
 // an IncrementalUpgrade while also updating the Status.TargetCapacity of the Active and Pending RayServices.
-func (r *RayServiceReconciler) reconcileServeTargetCapacity(ctx context.Context, rayServiceInstance *rayv1.RayService, rayDashboardClient utils.RayDashboardClientInterface) error {
+func (r *RayServiceReconciler) reconcileServeTargetCapacity(ctx context.Context, rayServiceInstance *rayv1.RayService, rayClusterInstance *rayv1.RayCluster, rayDashboardClient utils.RayDashboardClientInterface) error {
 	logger := ctrl.LoggerFrom(ctx)
 	logger.Info("reconcileServeTargetCapacity", "RayService", rayServiceInstance.Name)
 
@@ -1293,18 +1310,26 @@ func (r *RayServiceReconciler) reconcileServeTargetCapacity(ctx context.Context,
 	// scaled up traffic and the active RayCluster can be scaled down by MaxSurgePercent.
 	// 2. The total target_capacity is equal to 100. This means the pending RayCluster can
 	// increase its target_capacity by MaxSurgePercent.
+	// If the rayClusterInstance passed into this function is not the cluster to update based
+	// on the above conditions, we return without doing anything.
 	var clusterName string
 	var goalTargetCapacity int32
 	if activeTargetCapacity+pendingTargetCapacity > int32(100) {
 		// Scale down the Active RayCluster TargetCapacity on this iteration.
 		goalTargetCapacity = max(int32(0), activeTargetCapacity-maxSurgePercent)
 		clusterName = activeRayServiceStatus.RayClusterName
+		if clusterName != rayClusterInstance.Name {
+			return nil
+		}
 		activeRayServiceStatus.TargetCapacity = ptr.To(goalTargetCapacity)
 		logger.Info("Setting target_capacity for active Raycluster", "Raycluster", clusterName, "target_capacity", goalTargetCapacity)
 	} else {
 		// Scale up the Pending RayCluster TargetCapacity on this iteration.
 		goalTargetCapacity = min(int32(100), pendingTargetCapacity+maxSurgePercent)
 		clusterName = pendingRayServiceStatus.RayClusterName
+		if clusterName != rayClusterInstance.Name {
+			return nil
+		}
 		pendingRayServiceStatus.TargetCapacity = ptr.To(goalTargetCapacity)
 		logger.Info("Setting target_capacity for pending Raycluster", "Raycluster", clusterName, "target_capacity", goalTargetCapacity)
 	}
@@ -1323,6 +1348,7 @@ func (r *RayServiceReconciler) reconcileServeTargetCapacity(ctx context.Context,
 	// Check if ServeConfig requires update
 	if currentTargetCapacity, ok := serveConfig["target_capacity"].(float64); ok {
 		if int32(currentTargetCapacity) == goalTargetCapacity {
+			logger.Info("target_capacity already updated on RayCluster", "RayCluster", clusterName, "target_capacity", currentTargetCapacity)
 			// No update required, return early
 			return nil
 		}
@@ -1550,15 +1576,17 @@ func (r *RayServiceReconciler) reconcileServe(ctx context.Context, rayServiceIns
 		incrementalUpgradeUpdate, reason := r.checkIfNeedIncrementalUpgradeUpdate(ctx, rayServiceInstance)
 		logger.Info("checkIfNeedIncrementalUpgradeUpdate", "incrementalUpgradeUpdate", incrementalUpgradeUpdate, "reason", reason)
 		if incrementalUpgradeUpdate {
-			if err := r.reconcileServeTargetCapacity(ctx, rayServiceInstance, rayDashboardClient); err != nil {
-				r.Recorder.Eventf(rayServiceInstance, corev1.EventTypeWarning, string(utils.FailedToUpdateTargetCapacity), "Failed to update target_capacity of serve applications to the RayService %s/%s: %v", rayServiceInstance.Namespace, rayServiceInstance.Name, err)
+			if err := r.reconcileServeTargetCapacity(ctx, rayServiceInstance, rayClusterInstance, rayDashboardClient); err != nil {
+				r.Recorder.Eventf(rayServiceInstance, corev1.EventTypeWarning, string(utils.FailedToUpdateTargetCapacity), "Failed to update target_capacity of serve applications to the RayCluster %s/%s: %v", rayClusterInstance.Namespace, rayClusterInstance.Name, err)
 				return false, serveApplications, err
 			}
 			r.Recorder.Eventf(rayServiceInstance, corev1.EventTypeNormal, string(utils.UpdatedServeTargetCapacity),
-				"Updated target_capacity of serve applications to the RayService %s/%s", rayServiceInstance.Namespace, rayServiceInstance.Name)
+				"Updated target_capacity of serve applications to to the RayCluster %s/%s", rayClusterInstance.Namespace, rayClusterInstance.Name)
 
 			// Don't switch to the pending RayCluster until IncrementalUpgrade is complete.
-			return false, serveApplications, nil
+			if rayServiceInstance.Status.PendingServiceStatus.RayClusterName == rayClusterInstance.Name {
+				return false, serveApplications, nil
+			}
 		}
 	}
 
