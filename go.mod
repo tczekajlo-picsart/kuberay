@@ -1,4 +1,4 @@
-module github.com/ray-project/kuberay
+module github.com/tczekajlo-picsart/kuberay
 
 go 1.24.0
 

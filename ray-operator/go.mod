@@ -1,4 +1,4 @@
-module github.com/ray-project/kuberay/ray-operator
+module github.com/tczekajlo-picsart/kuberay/ray-operator
 
 go 1.24.0
 
