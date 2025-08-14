@@ -120,4 +120,4 @@ require (
 	sigs.k8s.io/structured-merge-diff/v4 v4.7.0 // indirect
 )
 
-replace github.com/ray-project/kuberay/ray-operator => ./ray-operator
+replace github.com/tczekajlo-picsart/kuberay/ray-operator => ./ray-operator
