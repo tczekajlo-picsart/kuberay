@@ -8023,6 +8023,10 @@ spec:
                 required:
                 - headGroupSpec
                 type: object
+              rayClusterDeletionDelaySeconds:
+                format: int32
+                minimum: 0
+                type: integer
               serveConfigV2:
                 type: string
               serveService:

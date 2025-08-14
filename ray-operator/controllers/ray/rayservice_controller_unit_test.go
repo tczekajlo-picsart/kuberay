@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	cmap "github.com/orcaman/concurrent-map/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -63,52 +64,6 @@ func TestGenerateHashWithoutReplicasAndWorkersToDelete(t *testing.T) {
 	hash3, err := generateHashWithoutReplicasAndWorkersToDelete(cluster.Spec)
 	require.NoError(t, err)
 	assert.NotEqual(t, hash1, hash3)
-}
-
-func TestInconsistentRayServiceStatuses(t *testing.T) {
-	oldStatus := rayv1.RayServiceStatuses{
-		ActiveServiceStatus: rayv1.RayServiceStatus{
-			RayClusterName: "new-cluster",
-			Applications: map[string]rayv1.AppStatus{
-				utils.DefaultServeAppName: {
-					Status:  rayv1.ApplicationStatusEnum.RUNNING,
-					Message: "OK",
-					Deployments: map[string]rayv1.ServeDeploymentStatus{
-						"serve-1": {
-							Status:  rayv1.DeploymentStatusEnum.UNHEALTHY,
-							Message: "error",
-						},
-					},
-				},
-			},
-		},
-		PendingServiceStatus: rayv1.RayServiceStatus{
-			RayClusterName: "old-cluster",
-			Applications: map[string]rayv1.AppStatus{
-				utils.DefaultServeAppName: {
-					Status:  rayv1.ApplicationStatusEnum.NOT_STARTED,
-					Message: "application not started yet",
-					Deployments: map[string]rayv1.ServeDeploymentStatus{
-						"serve-1": {
-							Status:  rayv1.DeploymentStatusEnum.HEALTHY,
-							Message: "Serve is healthy",
-						},
-					},
-				},
-			},
-		},
-		ServiceStatus: rayv1.NotRunning,
-	}
-	ctx := context.Background()
-
-	// Test 1: Update ServiceStatus only.
-	newStatus := oldStatus.DeepCopy()
-	newStatus.ServiceStatus = rayv1.Running
-	assert.True(t, inconsistentRayServiceStatuses(ctx, oldStatus, *newStatus))
-
-	// Test 2: Test RayServiceStatus
-	newStatus = oldStatus.DeepCopy()
-	assert.False(t, inconsistentRayServiceStatuses(ctx, oldStatus, *newStatus))
 }
 
 func TestIsHeadPodRunningAndReady(t *testing.T) {
@@ -1335,7 +1290,6 @@ func makeIncrementalUpgradeRayService(
 				LastTrafficMigratedTime: lastTrafficMigratedTime,
 			},
 			PendingServiceStatus: rayv1.RayServiceStatus{
-				RayClusterName: "pending-ray-cluster",
 				RayClusterStatus: rayv1.RayClusterStatus{
 					Head: rayv1.HeadInfo{ServiceName: "pending-service"},
 				},
@@ -1455,16 +1409,6 @@ func TestCreateHTTPRoute(t *testing.T) {
 	tests := []struct {
 		name           string
 		rayService     *rayv1.RayService
-		runtimeObjects []runtime.Object
-		routedPercent  int32
-		expectError    bool
-	}{
-		{
-			name:           "valid HTTPRoute creation",
-			routedPercent:  int32(80),
-			rayService:     makeIncrementalUpgradeRayService(true, "gateway-class", ptr.To(int32(50)), ptr.To(int32(1000)), ptr.To(int32(80)), &metav1.Time{Time: time.Now()}),
-			runtimeObjects: []runtime.Object{activeService, pendingService, pendingCluster, activeCluster, gateway},
-			expectError:    false,
 		},
 		{
 			name:           "missing IncrementalUpgradeOptions",

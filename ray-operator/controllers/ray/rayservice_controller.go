@@ -234,7 +234,7 @@ func (r *RayServiceReconciler) Reconcile(ctx context.Context, request ctrl.Reque
 	}
 
 	// Final status update for any CR modification.
-	if inconsistentRayServiceStatuses(ctx, originalRayServiceInstance.Status, rayServiceInstance.Status) {
+	if utils.InconsistentRayServiceStatuses(originalRayServiceInstance.Status, rayServiceInstance.Status) {
 		rayServiceInstance.Status.LastUpdateTime = &metav1.Time{Time: time.Now()}
 		if errStatus := r.Status().Update(ctx, rayServiceInstance); errStatus != nil {
 			return ctrl.Result{RequeueAfter: ServiceDefaultRequeueDuration}, errStatus
@@ -938,16 +938,22 @@ func (r *RayServiceReconciler) cleanUpRayClusterInstance(ctx context.Context, ra
 		return err
 	}
 
-	// Clean up RayCluster instances. Each instance is deleted 60 seconds
+	// Determine the ray cluster deletion delay seconds
+	deletionDelay := RayClusterDeletionDelayDuration
+	if rayServiceInstance.Spec.RayClusterDeletionDelaySeconds != nil {
+		deletionDelay = time.Duration(*rayServiceInstance.Spec.RayClusterDeletionDelaySeconds) * time.Second
+	}
+	// Clean up RayCluster instances. Each instance is deleted after the configured deletion delay.
 	for _, rayClusterInstance := range rayClusterList.Items {
 		if rayClusterInstance.Name != rayServiceInstance.Status.ActiveServiceStatus.RayClusterName && rayClusterInstance.Name != rayServiceInstance.Status.PendingServiceStatus.RayClusterName {
 			cachedTimestamp, exists := r.RayClusterDeletionTimestamps.Get(rayClusterInstance.Name)
 			if !exists {
-				deletionTimestamp := metav1.Now().Add(RayClusterDeletionDelayDuration)
+				deletionTimestamp := metav1.Now().Add(deletionDelay)
 				r.RayClusterDeletionTimestamps.Set(rayClusterInstance.Name, deletionTimestamp)
 				logger.Info(
 					"Scheduled dangling RayCluster for deletion",
 					"rayClusterName", rayClusterInstance.Name,
+					"deletionDelay", deletionDelay.String(),
 					"deletionTimestamp", deletionTimestamp,
 				)
 			} else {
@@ -1525,7 +1531,7 @@ func (r *RayServiceReconciler) reconcileServices(ctx context.Context, rayService
 	return nil, err
 }
 
-// Reconciles the Serve applications on the RayCluster. Returns (isReady, error).
+// Reconciles the Serve applications on the RayCluster. Returns (isReady, serveApplicationStatus, error).
 // The `isReady` flag indicates whether the RayCluster is ready to handle incoming traffic.
 func (r *RayServiceReconciler) reconcileServe(ctx context.Context, rayServiceInstance *rayv1.RayService, rayClusterInstance *rayv1.RayCluster) (bool, map[string]rayv1.AppStatus, error) {
 	logger := ctrl.LoggerFrom(ctx)
